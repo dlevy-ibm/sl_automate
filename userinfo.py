@@ -1,0 +1,2 @@
+user=PUT_USERNAME_HERE
+api_key=PUT_REAL_KEY_HERE
