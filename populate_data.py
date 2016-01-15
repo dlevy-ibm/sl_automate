@@ -1,6 +1,8 @@
 import SoftLayer
 import userinfo
-import machineinfo
+from baremetal import *
+
+
 
 def get_ethernet_type(machine_nfo):
 	for networkComponent in machine_nfo["networkComponents"]:
@@ -18,7 +20,7 @@ def get_private_vlan_id(machine_nfo):
 			if vlan["name"] == "Private Primary":
 				return vlan["id"]
 
-#Read fqdn as dict so we can perform a quick lookup by fqdn
+#Read fqdn as dict so we can perform a constant time lookup by fqdn
 def read_known_machines(filename):
 	machines_in_file = {}
 	pos = 0
@@ -35,16 +37,23 @@ def read_known_machines(filename):
 
 
 
-#Use the fqdn map and the softlayer list of hardware to convert
-#to an id map
-def init_all_machine_data_with_ids(mgr):
+
+def create_fqdn_to_id_map(mgr):
+	fqdn_id_map = {}
+	for device in mgr.list_hardware(mask="id, fullyQualifiedDomainName"):
+		fqdn_id_map[device["fullyQualifiedDomainName"]] = device["id"]
+	return fqdn_id_map
+
+
+#Match provided FQDN to Softlayer ID in constant time
+def init_machines_with_ids(mgr):
 	machines_in_file = read_known_machines("machines.csv")
-	all_machine_data = {}
-	for machine in mgr.list_hardware(mask="id, fullyQualifiedDomainName"):
-		if machine["fullyQualifiedDomainName"] in machines_in_file:
-			machine_info = machineinfo.MachineInfo(machines_in_file[machine["fullyQualifiedDomainName"]])
-			all_machine_data[machine["id"]] = machine_info
-	return all_machine_data
+	fqdn_id_map = create_fqdn_to_id_map(mgr)
+	machines = {}
+	for machine in machines_in_file:
+		if machine in fqdn_id_map:
+			machines[fqdn_id_map[machine]] = Baremetal(machines_in_file[machine])
+	return machines
 
 def get_private_portable_subnet(vlan_nfo):
 	for subnet in vlan_nfo["subnets"]:
@@ -56,6 +65,7 @@ def get_private_primary_subnet(vlan_nfo):
 		if (subnet["subnetType"] == "PRIMARY" and subnet["addressSpace"] == "PRIVATE"):
 			return subnet
 
+#Adds a number to the last octet of an IP
 def add_num_to_ip(ip, num):
 	ip_split = ip.split('.')
 	ip_split[-1] = str(int(ip_split[-1]) + num)
@@ -70,11 +80,11 @@ client = SoftLayer.create_client_from_env(username=userinfo.user, api_key=userin
 hardware_mgr = SoftLayer.HardwareManager(client)
 net_mgr = SoftLayer.NetworkManager(client)
 
-all_machine_data = init_all_machine_data_with_ids(hardware_mgr)
+machines = init_machines_with_ids(hardware_mgr)
 output = open('output.txt', 'w+')
 num_machines_identified = 0
 
-for machine_id in all_machine_data:
+for machine_id in machines:
 
 	machine_info = hardware_mgr.get_hardware(hardware_id=machine_id, mask=hardware_mask)
 	private_vlan_id = get_private_vlan_id(machine_info)
@@ -83,32 +93,26 @@ for machine_id in all_machine_data:
 	private_primary_subnet_info = get_private_primary_subnet(vlan_info)
 	private_portable = private_portable_subnet_info["networkIdentifier"]
 
-	private_portable_ip = add_num_to_ip(private_portable,machine_add_constant + all_machine_data[machine_id].file_pos)
-	all_machine_data[machine_id].private_portable_ip = private_portable_ip
-	all_machine_data[machine_id].private_portable_netmask = private_portable_subnet_info["netmask"]
-	all_machine_data[machine_id].primary_private_ip = machine_info["primaryBackendIpAddress"]
-	all_machine_data[machine_id].primary_private_netmask = private_primary_subnet_info["netmask"]
-	all_machine_data[machine_id].private_portable_gateway_ip = add_num_to_ip(private_portable, 4)
-	if (all_machine_data[machine_id].node_name.startswith("controller")):
-		all_machine_data[machine_id].ucarp_private_portable_ip = add_num_to_ip(private_portable, 7)
+	private_portable_ip = add_num_to_ip(private_portable,machine_add_constant + machines[machine_id].file_pos)
+	machines[machine_id].private_portable_ip = private_portable_ip
+	machines[machine_id].private_portable_netmask = private_portable_subnet_info["netmask"]
+	machines[machine_id].primary_private_ip = machine_info["primaryBackendIpAddress"]
+	machines[machine_id].primary_private_netmask = private_primary_subnet_info["netmask"]
+	machines[machine_id].private_portable_gateway_ip = add_num_to_ip(private_portable, 4)
+	if (machines[machine_id].node_name.startswith("controller")):
+		machines[machine_id].ucarp_private_portable_ip = add_num_to_ip(private_portable, 7)
 	ethernet_type = get_ethernet_type(machine_info)
 	if (ethernet_type == 0):
-		all_machine_data[machine_id].interface_1 = 0
-		all_machine_data[machine_id].interface_2 = 2
+		machines[machine_id].interface_1 = 0
+		machines[machine_id].interface_2 = 2
 	else:
-		all_machine_data[machine_id].interface_1 = 4
-		all_machine_data[machine_id].interface_2 = 6
+		machines[machine_id].interface_1 = 4
+		machines[machine_id].interface_2 = 6
 
-	output.write(all_machine_data[machine_id].to_csv_line() + "\n")
+	output.write(machines[machine_id].to_csv() + "\n")
 	num_machines_identified += 1
 	print ("Proccessing machine number: " + str(num_machines_identified))
 
 
 print ("Succesfully identified " + str(num_machines_identified) + " machines")
 
-
-
-#<nodename, private_portable_IP, private_portable_netmask,
-#    private_portable_gateway_IP, primary_private_IP, primary_private_netmask,
-#    interface_1, interface_2,
-#    ucarp_private_portable_IP>
